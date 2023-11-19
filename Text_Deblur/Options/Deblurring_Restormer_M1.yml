@@ -21,14 +21,14 @@ datasets:
 
     # data loader
     use_shuffle: true
-    num_worker_per_gpu: 6
-    batch_size_per_gpu: 6
+    num_worker_per_gpu: 2
+    batch_size_per_gpu: 1
 
     ### -------------Progressive training--------------------------
-    mini_batch_sizes: [6, 4, 3, 1]          # Batch size per gpu   
-    iters: [180000,120000,100000,72000]
+    mini_batch_sizes: [1, 1]          # Batch size per gpu   
+    iters: [92000,208000]
     gt_size: 256   # Max patch size for progressive training
-    gt_sizes: [128, 160, 192, 256]  # Patch sizes for progressive training.
+    gt_sizes: [256, 256]  # Patch sizes for progressive training.
     ### ------------------------------------------------------------
 
     ### ------- Training on single fixed-patch size 128x128---------
@@ -72,7 +72,7 @@ path:
 
 # training settings
 train:
-  total_iter: 472000
+  total_iter: 300000
   warmup_iter: -1 # no warm up
   use_grad_clip: true
 
@@ -81,7 +81,7 @@ train:
   # 2nd cycle: cosine annealing (3e-4 to 1e-6) for 208k iters.
   scheduler:
     type: CosineAnnealingRestartCyclicLR
-    periods: [180000, 292000]       
+    periods: [92000, 208000]       
     restart_weights: [1,1]
     eta_mins: [0.0003,0.000001]   
   
