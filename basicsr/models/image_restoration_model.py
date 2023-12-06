@@ -19,6 +19,8 @@ import cv2
 import torch.nn.functional as F
 from functools import partial
 
+from torch.nn.parallel import DataParallel, DistributedDataParallel
+
 
 class Mixing_Augment:
     def __init__(self, mixup_beta, use_identity, device):
@@ -311,3 +313,95 @@ class ImageCleanModel(BaseModel):
         else:
             self.save_network(self.net_g, "net_g", current_iter)
         self.save_training_state(epoch, current_iter)
+
+
+class ControlledImageCleanModel(ImageCleanModel):
+    """
+    Controllable deblur model for single image deblur.
+    """
+
+    def model_to_device(self, net):
+        """Model to device. It also warps models with DistributedDataParallel
+        or DataParallel. Exclude clip model from DDP
+
+        Args:
+            net (nn.Module)
+        """
+        net = net.to(self.device)
+        if self.opt["dist"]:
+            find_unused_parameters = self.opt.get("find_unused_parameters", False)
+            params_to_ignore = []
+            for name, params in net.named_parameters():
+                if not params.requires_grad:
+                    params_to_ignore.append(name)
+            DistributedDataParallel._set_params_and_buffers_to_ignore_for_model(net, params_to_ignore)
+            net = DistributedDataParallel(
+                net, device_ids=[torch.cuda.current_device()], find_unused_parameters=find_unused_parameters
+            )
+        elif self.opt["num_gpu"] > 1:
+            net = DataParallel(net)
+        return net
+
+    def feed_train_data(self, data):
+        self.lq = data["lq"].to(self.device)
+        if "gt" in data:
+            self.gt = data["gt"].to(self.device)
+
+        self.hint = self.lq if self.opt["train"]["hint"] == "lq" else self.gt
+
+        if self.mixing_flag:
+            self.gt, self.lq = self.mixing_augmentation(self.gt, self.lq)
+
+    def feed_data(self, data):
+        self.lq = data["lq"].to(self.device)
+        if "gt" in data:
+            self.gt = data["gt"].to(self.device)
+
+        self.hint = self.lq if self.opt["train"]["hint"] == "lq" else self.gt
+
+    def optimize_parameters(self, current_iter):
+        self.optimizer_g.zero_grad()
+        preds = self.net_g(self.lq, self.hint)
+        if not isinstance(preds, list):
+            preds = [preds]
+
+        self.output = preds[-1]
+
+        loss_dict = OrderedDict()
+        # pixel loss
+        l_pix = 0.0
+        for pred in preds:
+            l_pix += self.cri_pix(pred, self.gt)
+
+        loss_dict["l_pix"] = l_pix
+
+        l_pix.backward()
+        if self.opt["train"]["use_grad_clip"]:
+            torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 0.01)
+        self.optimizer_g.step()
+
+        self.log_dict = self.reduce_loss_dict(loss_dict)
+
+        if self.ema_decay > 0:
+            self.model_ema(decay=self.ema_decay)
+
+    def nonpad_test(self, img=None, hint=None):
+        if img is None:
+            img = self.lq
+        if hint is None:
+            hint = self.hint
+        if hasattr(self, "net_g_ema"):
+            self.net_g_ema.eval()
+            with torch.no_grad():
+                pred = self.net_g_ema(img, hint)
+            if isinstance(pred, list):
+                pred = pred[-1]
+            self.output = pred
+        else:
+            self.net_g.eval()
+            with torch.no_grad():
+                pred = self.net_g(img, hint)
+            if isinstance(pred, list):
+                pred = pred[-1]
+            self.output = pred
+            self.net_g.train()
